@@ -73,7 +73,7 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
     mtm_df.columns = header
 
     if 'IDs' in mtm_df.columns:
-        mtm_df['IDs'] = mtm_df['IDs'].fillna(method='ffill')
+        mtm_df['IDs'] = mtm_df['IDs'].ffill()
     if len(mtm_df) > 0:
         mtm_df = mtm_df.iloc[:-1, :]  
 
@@ -91,7 +91,7 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
         ).reset_index(drop=True)
     capital_deployed_df = tidy_block_as_table(capital_deployed_df, header)
     if 'IDs' in capital_deployed_df.columns:
-        capital_deployed_df['IDs'] = capital_deployed_df['IDs'].fillna(method='ffill')
+        capital_deployed_df['IDs'] = capital_deployed_df['IDs'].ffill()
 
     max_loss_df = tidy_block_as_table(max_loss_df, header)
     max_loss_df = max_loss_df.iloc[2:].reset_index(drop=True)
@@ -100,7 +100,7 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
             index=[max_loss_df.index[-2], max_loss_df.index[-1]]
         ).reset_index(drop=True)
     if 'IDs' in max_loss_df.columns:
-        max_loss_df['IDs'] = max_loss_df['IDs'].fillna(method='ffill')
+        max_loss_df['IDs'] = max_loss_df['IDs'].ffill()
 
     date_cols = header[3:]
     expanded = pd.DataFrame(new_df.values.repeat(len(date_cols), axis=0), columns=new_df.columns)
@@ -122,6 +122,9 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
             col = row['Date']
             if col in matched.columns:
                 val = matched.iloc[0][col]
+                # Handle duplicate columns
+                if isinstance(val, pd.Series):
+                    val = val.iloc[0]
                 if pd.notna(val):
                     check.at[idx, 'Capital'] = val
 
@@ -135,6 +138,9 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
             col = row['Date']
             if col in matched.columns:
                 val = matched.iloc[0][col]
+                # Handle duplicate columns
+                if isinstance(val, pd.Series):
+                    val = val.iloc[0]
                 if pd.notna(val):
                     check.at[idx, 'MTM'] = val
 
@@ -148,6 +154,9 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
             col = row['Date']
             if col in matched.columns:
                 val = matched.iloc[0][col]
+                # Handle duplicate columns
+                if isinstance(val, pd.Series):
+                    val = val.iloc[0]
                 if pd.notna(val):
                     check.at[idx, 'Max Loss'] = val
 
@@ -167,7 +176,11 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             return False
 
-    mask_keep = ~check['Capital'].apply(is_empty_zero)
+    mask_capital = ~check['Capital'].apply(is_empty_zero)
+    mask_mtm = ~check['MTM'].apply(is_empty_zero)
+    
+    # Keep row if Capital is valid OR MTM is valid
+    mask_keep = mask_capital | mask_mtm
     check = check.loc[mask_keep].reset_index(drop=True)
     return check
 
@@ -251,8 +264,13 @@ if res is not None and not res.empty:
 
         st.subheader("Stats – Sum of MTM for: VT, RM, GB, RD, PS")
         names = ["VT", "RM", "GB", "RD", "PS"]
+        # Filter for partners and deduplicate for Stats
+        stats_df = ranged[ranged["Child Name"].isin(names)].copy()
+        # Deduplicate based on: Partner(Child Name), Date, User ID(ID), Algo(algo), MTM
+        stats_df = stats_df.drop_duplicates(subset=["Child Name", "Date", "ID", "algo", "MTM"])
+
         mtm_by_name = (
-            ranged[ranged["Child Name"].isin(names)]
+            stats_df
             .groupby("Child Name", dropna=False)["MTM"]
             .sum(min_count=1)
             .reindex(names, fill_value=np.nan)
@@ -289,7 +307,7 @@ if res is not None and not res.empty:
 
         partner_view = partner_df[[ 
             "Partner", "Date", "User ID", "Algo", "MTM", "Allocation", "Max Loss", "broker", "dte", "index"
-        ]].drop_duplicates(subset=["Partner", "Date", "User ID", "MTM"]).reset_index(drop=True)
+        ]].drop_duplicates(subset=["Partner", "Date", "User ID", "Algo", "MTM"]).reset_index(drop=True)
 
         st.dataframe(partner_view, use_container_width=True)
 

@@ -54,10 +54,13 @@ def tidy_block_as_table(block_df, header):
     return block_df
 
 def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
-    mtm_row_index = df[df["Unnamed: 0"] == "MTM"].index[0]
-    capital_deployed_row_index = df[df["Unnamed: 0"] == "Capital Deployed"].index[0]
-    max_loss_row_index = df[df["Unnamed: 0"] == "Max SL"].index[0]
-    AVG_row_index = df[df["Unnamed: 0"] == "AVG %"].index[0]
+    # Dynamically get the first column name instead of hardcoding "Unnamed: 0"
+    first_col = df.columns[0]
+    
+    mtm_row_index = df[df[first_col] == "MTM"].index[0]
+    capital_deployed_row_index = df[df[first_col] == "Capital Deployed"].index[0]
+    max_loss_row_index = df[df[first_col] == "Max SL"].index[0]
+    AVG_row_index = df[df[first_col] == "AVG %"].index[0]
 
     mtm_df = df.iloc[mtm_row_index:capital_deployed_row_index + 1].copy()
     capital_deployed_df = df.iloc[capital_deployed_row_index:max_loss_row_index + 1].copy()
@@ -222,6 +225,14 @@ with st.sidebar:
                 outs = []
                 for sh in chosen_sheets:
                     df = pd.read_excel(xls, sheet_name=sh, engine="openpyxl")
+                    # Debug: Show column names
+                    st.info(f"Sheet '{sh}' columns: {list(df.columns)[:5]}")  # Show first 5 columns
+                    st.info(f"First column name: '{df.columns[0]}'")
+                    
+                    # Debug: Show first column values to help identify markers
+                    first_col_values = df[df.columns[0]].dropna().unique()[:20]
+                    st.info(f"First 20 unique values in first column: {list(first_col_values)}")
+                    
                     outs.append(build_output_for_sheet(df))
                 st.session_state.result = pd.concat(outs, ignore_index=True) if outs else None
                 if st.session_state.result is None or st.session_state.result.empty:
@@ -230,6 +241,7 @@ with st.sidebar:
                     st.success("Processed ✅")
             except Exception as e:
                 st.error(f"Error while processing: {e}")
+                st.error("Please check that your Excel file has 'MTM', 'Capital Deployed', 'Max SL', 'AVG %' in the first column.")
 
 # ----------------- Main: tables + filters + cards -----------------
 res = st.session_state.result

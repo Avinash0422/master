@@ -53,19 +53,95 @@ def tidy_block_as_table(block_df, header):
     block_df.columns = header
     return block_df
 
-def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
-    # Dynamically get the first column name instead of hardcoding "Unnamed: 0"
+def find_marker_row(df: pd.DataFrame, marker_variants: list, marker_name: str, sheet_name: str) -> int:
     first_col = df.columns[0]
+    col_series = df[first_col].astype(str).str.strip().str.lower()
     
-    mtm_row_index = df[df[first_col] == "MTM"].index[0]
-    capital_deployed_row_index = df[df[first_col] == "Capital Deployed"].index[0]
-    max_loss_row_index = df[df[first_col] == "Max SL"].index[0]
-    AVG_row_index = df[df[first_col] == "AVG %"].index[0]
+    # 1. Exact match (case-insensitive and stripped)
+    for variant in marker_variants:
+        variant_clean = variant.lower().strip()
+        matches = df[col_series == variant_clean].index
+        if len(matches) > 0:
+            return matches[0]
+            
+    # 2. Substring match (case-insensitive)
+    for variant in marker_variants:
+        variant_clean = variant.lower().strip()
+        matches = df[col_series.str.contains(variant_clean, na=False)].index
+        if len(matches) > 0:
+            return matches[0]
+            
+    # If not found, raise a helpful error listing available values in the first column
+    unique_vals = [str(x).strip() for x in df[first_col].dropna().unique() if str(x).strip()][:40]
+    raise ValueError(
+        f"In sheet '{sheet_name}': Could not find marker '{marker_name}' (tried variants: {marker_variants}). "
+        f"The first column of this sheet has the following values: {unique_vals}"
+    )
+
+def build_output_for_sheet(df: pd.DataFrame, sheet_name: str = "") -> pd.DataFrame:
+    # 1. Shift dataframe if the label column is not the first column (e.g. column A is empty/margins)
+    marker_col_idx = 0
+    for col_idx in range(min(4, len(df.columns))):
+        col_series = df.iloc[:, col_idx].astype(str).str.strip().str.lower()
+        if col_series.str.contains("mtm", na=False).any() or col_series.str.contains("capital", na=False).any():
+            marker_col_idx = col_idx
+            break
+            
+    if marker_col_idx > 0:
+        df = df.iloc[:, marker_col_idx:].copy()
+        
+    first_col = df.columns[0]
+    col_series = df[first_col].astype(str).str.strip().str.lower()
+    
+    def find_optional_marker(marker_variants):
+        for variant in marker_variants:
+            variant_clean = variant.lower().strip()
+            # Try exact match
+            matches = df[col_series == variant_clean].index
+            if len(matches) > 0:
+                return matches[0]
+            # Try substring
+            matches = df[col_series.str.contains(variant_clean, na=False)].index
+            if len(matches) > 0:
+                return matches[0]
+        return None
+
+    # Find the row indices dynamically (MTM and Capital Deployed are required, Max SL and AVG % are optional)
+    mtm_row_index = find_optional_marker(["MTM"])
+    if mtm_row_index is None:
+        unique_vals = [str(x).strip() for x in df[first_col].dropna().unique() if str(x).strip()][:40]
+        raise ValueError(f"In sheet '{sheet_name}': Could not find required 'MTM' marker. Values found: {unique_vals}")
+        
+    capital_deployed_row_index = find_optional_marker(["Capital Deployed", "Capital"])
+    if capital_deployed_row_index is None:
+        unique_vals = [str(x).strip() for x in df[first_col].dropna().unique() if str(x).strip()][:40]
+        raise ValueError(f"In sheet '{sheet_name}': Could not find required 'Capital Deployed' marker. Values found: {unique_vals}")
+        
+    max_loss_row_index = find_optional_marker(["Max SL", "Max Loss"])
+    AVG_row_index = find_optional_marker(["AVG %", "AVG"])
+
+    # Determine boundaries of each section
+    if max_loss_row_index is not None:
+        capital_deployed_end = max_loss_row_index + 1
+    elif AVG_row_index is not None:
+        capital_deployed_end = AVG_row_index + 1
+    else:
+        capital_deployed_end = len(df)
+        
+    if AVG_row_index is not None:
+        max_loss_end = AVG_row_index + 1
+    else:
+        max_loss_end = len(df)
 
     mtm_df = df.iloc[mtm_row_index:capital_deployed_row_index + 1].copy()
-    capital_deployed_df = df.iloc[capital_deployed_row_index:max_loss_row_index + 1].copy()
-    max_loss_df = df.iloc[max_loss_row_index:AVG_row_index + 1].copy()
+    capital_deployed_df = df.iloc[capital_deployed_row_index:capital_deployed_end].copy()
+    
+    if max_loss_row_index is not None:
+        max_loss_df = df.iloc[max_loss_row_index:max_loss_end].copy()
+    else:
+        max_loss_df = None
 
+    # Process MTM Section
     for col in range(3, len(mtm_df.columns)):
         mtm_df.iloc[1, col] = mtm_df.iloc[0, col]
     mtm_df = mtm_df.drop(index=mtm_df.index[0]).reset_index(drop=True)
@@ -77,8 +153,13 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
     if 'IDs' in mtm_df.columns:
         mtm_df['IDs'] = mtm_df['IDs'].ffill()
+
+    # Clean up non-data rows (sums, headers, nans)
+    exclude_labels = {'sum', 'nan', '', 'max sl', 'avg %', 'capital deployed', 'mtm', 'ids'}
     if len(mtm_df) > 0:
-        mtm_df = mtm_df.iloc[:-1, :]  
+        first_col_name = mtm_df.columns[0]
+        col_clean = mtm_df[first_col_name].astype(str).str.strip().str.lower()
+        mtm_df = mtm_df[~col_clean.isin(exclude_labels)].reset_index(drop=True)
 
     end_index = first_nan_idx(header)
     header = header[:end_index]
@@ -87,23 +168,24 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
     new_df = normalize_parent_child(mtm_df)
 
+    # Process Capital Deployed Section
     capital_deployed_df = capital_deployed_df.iloc[2:].reset_index(drop=True)
-    if len(capital_deployed_df) >= 2:
-        capital_deployed_df = capital_deployed_df.drop(
-            index=[capital_deployed_df.index[-2], capital_deployed_df.index[-1]]
-        ).reset_index(drop=True)
+    col_clean = capital_deployed_df[first_col].astype(str).str.strip().str.lower()
+    capital_deployed_df = capital_deployed_df[~col_clean.isin(exclude_labels)].reset_index(drop=True)
+    
     capital_deployed_df = tidy_block_as_table(capital_deployed_df, header)
     if 'IDs' in capital_deployed_df.columns:
         capital_deployed_df['IDs'] = capital_deployed_df['IDs'].ffill()
 
-    max_loss_df = tidy_block_as_table(max_loss_df, header)
-    max_loss_df = max_loss_df.iloc[2:].reset_index(drop=True)
-    if len(max_loss_df) >= 2:
-        max_loss_df = max_loss_df.drop(
-            index=[max_loss_df.index[-2], max_loss_df.index[-1]]
-        ).reset_index(drop=True)
-    if 'IDs' in max_loss_df.columns:
-        max_loss_df['IDs'] = max_loss_df['IDs'].ffill()
+    # Process Max Loss Section (if present)
+    if max_loss_df is not None:
+        max_loss_df = max_loss_df.iloc[2:].reset_index(drop=True)
+        col_clean = max_loss_df[first_col].astype(str).str.strip().str.lower()
+        max_loss_df = max_loss_df[~col_clean.isin(exclude_labels)].reset_index(drop=True)
+        
+        max_loss_df = tidy_block_as_table(max_loss_df, header)
+        if 'IDs' in max_loss_df.columns:
+            max_loss_df['IDs'] = max_loss_df['IDs'].ffill()
 
     date_cols = header[3:]
     expanded = pd.DataFrame(new_df.values.repeat(len(date_cols), axis=0), columns=new_df.columns)
@@ -148,20 +230,21 @@ def build_output_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
                     check.at[idx, 'MTM'] = val
 
     check['Max Loss'] = None
-    for idx, row in check.iterrows():
-        matched = max_loss_df.loc[
-            (max_loss_df['IDs'] == row['ID']) & 
-            (max_loss_df['Alias'] == row['Child Name'])
-        ]
-        if not matched.empty:
-            col = row['Date']
-            if col in matched.columns:
-                val = matched.iloc[0][col]
-                # Handle duplicate columns
-                if isinstance(val, pd.Series):
-                    val = val.iloc[0]
-                if pd.notna(val):
-                    check.at[idx, 'Max Loss'] = val
+    if max_loss_df is not None:
+        for idx, row in check.iterrows():
+            matched = max_loss_df.loc[
+                (max_loss_df['IDs'] == row['ID']) & 
+                (max_loss_df['Alias'] == row['Child Name'])
+            ]
+            if not matched.empty:
+                col = row['Date']
+                if col in matched.columns:
+                    val = matched.iloc[0][col]
+                    # Handle duplicate columns
+                    if isinstance(val, pd.Series):
+                        val = val.iloc[0]
+                    if pd.notna(val):
+                        check.at[idx, 'Max Loss'] = val
 
     check['algo'] = check['Parent Name'].apply(extract_algo)
     check['Broker'] = "SREDJAINAM2_P"
@@ -210,7 +293,14 @@ with st.sidebar:
             st.error(f"Failed to read Excel: {e}")
 
     if st.session_state.sheet_names:
-        default_sheets = [s for s in st.session_state.sheet_names if s.upper().startswith("SEP")] or st.session_state.sheet_names[:1]
+        months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+        default_sheets = [
+            s for s in st.session_state.sheet_names 
+            if any(m in s.upper() for m in months)
+        ]
+        if not default_sheets:
+            default_sheets = st.session_state.sheet_names[:1]
+            
         chosen_sheets = st.multiselect(
             "Select sheet(s)",
             options=st.session_state.sheet_names,
@@ -233,7 +323,7 @@ with st.sidebar:
                     first_col_values = df[df.columns[0]].dropna().unique()[:20]
                     st.info(f"First 20 unique values in first column: {list(first_col_values)}")
                     
-                    outs.append(build_output_for_sheet(df))
+                    outs.append(build_output_for_sheet(df, sheet_name=sh))
                 st.session_state.result = pd.concat(outs, ignore_index=True) if outs else None
                 if st.session_state.result is None or st.session_state.result.empty:
                     st.warning("No rows produced.")
